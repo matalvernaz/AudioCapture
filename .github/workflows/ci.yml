@@ -39,6 +39,36 @@ jobs:
           $zipName = "AudioCapture-latest-windows-x64.zip"
           Compress-Archive -Path "package/*" -DestinationPath $zipName
 
+      - name: Sign the build for the in-app updater
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          # build-info.json describes AudioCapture.exe and carries an ECDSA P-256 signature over
+          # commit, commit date, size and SHA-256. The app embeds the matching public key and
+          # refuses anything that does not verify, so an unsigned release must never be published.
+          if (-not $env:UPDATE_SIGNING_KEY) { throw "UPDATE_SIGNING_KEY secret is missing; refusing to publish an unsigned build" }
+          $exe = "package/AudioCapture.exe"
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          $sha = ([System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+          $commit = (git rev-parse HEAD).Trim()
+          $commitDate = (git show -s --format=%cI HEAD).Trim()
+          $canonical = "AudioCapture build-info v1`ncommit=$commit`ncommit_date=$commitDate`nexe_size=$($bytes.Length)`nexe_sha256=$sha`n"
+          $cngKey = [System.Security.Cryptography.CngKey]::Import([Convert]::FromBase64String($env:UPDATE_SIGNING_KEY), [System.Security.Cryptography.CngKeyBlobFormat]::Pkcs8PrivateBlob)
+          $signer = [System.Security.Cryptography.ECDsaCng]::new($cngKey)
+          $signature = $signer.SignData([Text.Encoding]::UTF8.GetBytes($canonical), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.DSASignatureFormat]::IeeeP1363FixedFieldConcatenation)
+          if ($signature.Length -ne 64) { throw "unexpected signature length $($signature.Length)" }
+          $manifest = [ordered]@{
+            schema = 1
+            commit = $commit
+            commit_date = $commitDate
+            built_at = (Get-Date).ToUniversalTime().ToString('o')
+            exe = [ordered]@{ name = 'AudioCapture.exe'; size = $bytes.Length; sha256 = $sha; signature = [Convert]::ToBase64String($signature) }
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path build-info.json -Encoding ascii
+          Copy-Item $exe AudioCapture.exe
+          Get-Content build-info.json
+
       - name: Delete existing latest release and tag
         shell: pwsh
         run: |
@@ -70,7 +100,10 @@ jobs:
             ---
 
             For versioned releases, see the [Releases page](https://github.com/${{ github.repository }}/releases).
-          files: AudioCapture-latest-windows-x64.zip
+          files: |
+            AudioCapture-latest-windows-x64.zip
+            AudioCapture.exe
+            build-info.json
           draft: false
           prerelease: true
           generate_release_notes: true

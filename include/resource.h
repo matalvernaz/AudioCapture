@@ -42,6 +42,7 @@
 #define IDC_SAVE_PRESET_BTN 1039
 #define IDC_LOAD_PRESET_BTN 1040
 #define IDC_DELETE_PRESET_BTN 1041
+#define IDC_UPDATE_BTN 1042
 
 // Menu IDs
 #define IDM_EXIT                2001

@@ -12,6 +12,8 @@
 #include "resource.h"
 #include "ProcessEnumerator.h"
 #include "CaptureManager.h"
+#include "Updater.h"
+#include <thread>
 #include "AudioDeviceEnumerator.h"
 
 using json = nlohmann::json;
@@ -67,6 +69,10 @@ HWND g_hDeletePresetBtn;
 HWND g_hLastFocusedCtrl = nullptr;
 bool g_isAppActive = true;
 const UINT WM_APP_RESTORE_FOCUS = WM_APP + 1;
+const UINT WM_APP_UPDATE_CHECKED = WM_APP + 2;    // lParam: updater::CheckOutcome*, owned by the receiver
+const UINT WM_APP_UPDATE_INSTALLED = WM_APP + 3;  // lParam: std::pair<bool, std::wstring>*, owned by the receiver
+HWND g_hUpdateBtn;
+std::thread g_updateThread;  // one network job at a time; the button is disabled while it runs
 bool g_captureButtonStops = false;
 bool g_restoreFocusOnActivate = false;
 
@@ -134,6 +140,9 @@ void CheckProcessesByNames(const std::vector<std::wstring>& names);
 void SavePreset();
 void LoadPreset();
 void DeletePreset();
+void StartUpdateCheck();
+void StartUpdateInstall(const updater::Manifest& manifest);
+void OnUpdateChecked(const updater::CheckOutcome& outcome);
 LRESULT CALLBACK PresetNameDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 bool IsValidPresetName(const std::wstring& name);
 
@@ -176,6 +185,18 @@ bool SupportsProcessCapture() {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     g_hInst = hInstance;
+
+    // Keep the current directory and PATH out of DLL searches (Windows 8+; harmless where absent)
+    typedef BOOL (WINAPI* SetDefaultDllDirectoriesPtr)(DWORD);
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    SetDefaultDllDirectoriesPtr setDefaultDllDirectories = kernel32 ?
+        (SetDefaultDllDirectoriesPtr)GetProcAddress(kernel32, "SetDefaultDllDirectories") : nullptr;
+    if (setDefaultDllDirectories) {
+        setDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    }
+
+    // An update renames the old program to <name>.old.exe; tidy it up now that it is not running
+    updater::RemoveLeftoverOldExe();
 
     // Detect OS capabilities
     g_supportsProcessCapture = SupportsProcessCapture();
@@ -442,6 +463,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             BrowseOutputFolder();
             break;
 
+        case IDC_UPDATE_BTN:
+            StartUpdateCheck();
+            break;
+
         case IDC_FORMAT_COMBO:
             if (wmEvent == CBN_SELCHANGE) {
                 OnFormatChanged();
@@ -533,6 +558,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         SetWindowPos(g_hSavePresetBtn, nullptr, 270, 7, 100, 25, SWP_NOZORDER);
         SetWindowPos(g_hLoadPresetBtn, nullptr, 375, 7, 100, 25, SWP_NOZORDER);
         SetWindowPos(g_hDeletePresetBtn, nullptr, 480, 7, 110, 25, SWP_NOZORDER);
+        SetWindowPos(g_hUpdateBtn, nullptr, 600, 7, 140, 25, SWP_NOZORDER);
 
         // Adjust control positions and sizes based on whether process list is visible
         // Added 30 pixels to account for preset controls
@@ -568,8 +594,36 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         RemoveTrayIcon();
         SaveSettings();
         g_captureManager->StopAllCaptures();
+        if (g_updateThread.joinable()) {
+            g_updateThread.detach();  // a check still in flight just posts to a window that is gone
+        }
         PostQuitMessage(0);
         return 0;
+
+    case WM_APP_UPDATE_CHECKED: {
+        std::unique_ptr<updater::CheckOutcome> outcome(reinterpret_cast<updater::CheckOutcome*>(lParam));
+        EnableWindow(g_hUpdateBtn, TRUE);
+        SetWindowText(g_hStatusText, L"Ready.");
+        if (outcome) {
+            OnUpdateChecked(*outcome);
+        }
+        return 0;
+    }
+
+    case WM_APP_UPDATE_INSTALLED: {
+        std::unique_ptr<std::pair<bool, std::wstring>> result(
+            reinterpret_cast<std::pair<bool, std::wstring>*>(lParam));
+        if (result && result->first) {
+            SetWindowText(g_hStatusText, L"Update installed. Restarting.");
+            DestroyWindow(hwnd);  // the new build is already starting
+            return 0;
+        }
+        EnableWindow(g_hUpdateBtn, TRUE);
+        SetWindowText(g_hStatusText, L"Ready.");
+        std::wstring text = L"The update was not installed: " + (result ? result->second : std::wstring(L"unknown error")) + L".";
+        MessageBox(hwnd, text.c_str(), L"Update Failed", MB_OK | MB_ICONERROR);
+        return 0;
+    }
 
     case WM_TIMER:
         if (wParam == 1) {
@@ -653,6 +707,14 @@ void InitializeControls(HWND hwnd) {
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
         480, 7, 110, 25,
         hwnd, (HMENU)IDC_DELETE_PRESET_BTN, g_hInst, nullptr
+    );
+
+    // Manual update check against this fork's GitHub release (nothing runs on its own)
+    g_hUpdateBtn = CreateWindow(
+        L"BUTTON", L"Check for &Updates",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+        600, 7, 140, 25,
+        hwnd, (HMENU)IDC_UPDATE_BTN, g_hInst, nullptr
     );
 
     // Process list label (moved down to make room for presets)
@@ -1530,6 +1592,82 @@ void StartCapture() {
         message += L"\nTo record everything on purpose, choose [System Audio - All Processes].";
         MessageBox(g_hWnd, message.c_str(), L"Capture Failed", MB_OK | MB_ICONERROR);
     }
+}
+
+static std::wstring ShortCommit(const std::wstring& commit) {
+    return commit.size() > 7 ? commit.substr(0, 7) : commit;
+}
+
+void StartUpdateCheck() {
+    if (!g_captureManager->GetActiveSessions().empty()) {
+        MessageBox(g_hWnd, L"Stop all captures first. Installing an update restarts Audio Capture.",
+                   L"Captures Running", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (g_updateThread.joinable()) {
+        g_updateThread.join();
+    }
+    EnableWindow(g_hUpdateBtn, FALSE);
+    SetWindowText(g_hStatusText, L"Checking for updates...");
+    g_updateThread = std::thread([] {
+        auto* outcome = new updater::CheckOutcome(updater::CheckForUpdate());
+        if (!PostMessage(g_hWnd, WM_APP_UPDATE_CHECKED, 0, reinterpret_cast<LPARAM>(outcome))) {
+            delete outcome;
+        }
+    });
+}
+
+void OnUpdateChecked(const updater::CheckOutcome& outcome) {
+    const updater::BuildInfo running = updater::RunningBuild();
+    const updater::Manifest& published = outcome.manifest;
+    std::wstring mine = L"commit " + ShortCommit(running.commit) +
+                        (running.commitDate.empty() ? L"" : L" from " + running.commitDate);
+
+    switch (outcome.result) {
+    case updater::CheckResult::Error:
+        MessageBox(g_hWnd, outcome.message.c_str(), L"Update Check Failed", MB_OK | MB_ICONERROR);
+        break;
+
+    case updater::CheckResult::UpToDate: {
+        std::wstring text = L"You are running the latest build (" + mine + L").";
+        MessageBox(g_hWnd, text.c_str(), L"Up to Date", MB_OK | MB_ICONINFORMATION);
+        break;
+    }
+
+    case updater::CheckResult::PublishedIsOlder: {
+        std::wstring text = L"The published build (commit " + ShortCommit(published.commit) + L" from " +
+                            published.commitDate + L") is not newer than the one you are running (" + mine +
+                            L"). Nothing was changed.";
+        MessageBox(g_hWnd, text.c_str(), L"No Newer Build", MB_OK | MB_ICONINFORMATION);
+        break;
+    }
+
+    case updater::CheckResult::UpdateAvailable: {
+        std::wstring text = L"A newer build is available: commit " + ShortCommit(published.commit) + L" from " +
+                            published.commitDate + L". You are running " + mine +
+                            L".\n\nDownload and install it now? Audio Capture will restart.";
+        if (MessageBox(g_hWnd, text.c_str(), L"Update Available", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES) {
+            StartUpdateInstall(published);
+        }
+        break;
+    }
+    }
+}
+
+void StartUpdateInstall(const updater::Manifest& manifest) {
+    if (g_updateThread.joinable()) {
+        g_updateThread.join();
+    }
+    EnableWindow(g_hUpdateBtn, FALSE);
+    SetWindowText(g_hStatusText, L"Downloading and installing the update...");
+    updater::Manifest copy = manifest;
+    g_updateThread = std::thread([copy] {
+        auto* result = new std::pair<bool, std::wstring>(false, L"");
+        result->first = updater::DownloadAndInstall(copy, result->second);
+        if (!PostMessage(g_hWnd, WM_APP_UPDATE_INSTALLED, 0, reinterpret_cast<LPARAM>(result))) {
+            delete result;
+        }
+    });
 }
 
 void StopCapture() {

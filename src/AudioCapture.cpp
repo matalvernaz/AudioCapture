@@ -1,4 +1,5 @@
 #include "AudioCapture.h"
+#include "SystemDll.h"
 #include <avrt.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <audioclientactivationparams.h>
@@ -303,7 +304,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
     typedef HRESULT (STDAPICALLTYPE *ActivateAudioInterfaceAsyncPtr)(
         LPCWSTR, REFIID, PROPVARIANT*, IActivateAudioInterfaceCompletionHandler*, IActivateAudioInterfaceAsyncOperation**);
 
-    HMODULE hMmDevApi = LoadLibraryW(L"Mmdevapi.dll");
+    HMODULE hMmDevApi = LoadSystemDll(L"Mmdevapi.dll");
     if (!hMmDevApi) {
         RecordFailure(L"loading Mmdevapi.dll", HRESULT_FROM_WIN32(GetLastError()));
         handler->Release();

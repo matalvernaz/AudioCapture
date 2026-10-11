@@ -25,6 +25,7 @@ set(SOURCES
     src/CaptureManager.cpp
     src/AudioDeviceEnumerator.cpp
     src/AudioMixer.cpp
+    src/Updater.cpp
     resource.rc
 )
 
@@ -38,8 +39,18 @@ set(HEADERS
     include/CaptureManager.h
     include/AudioDeviceEnumerator.h
     include/AudioMixer.h
+    include/SystemDll.h
+    include/Updater.h
     include/resource.h
 )
+
+# Build identity for the updater, regenerated on every build (see tools/generate_build_info.cmake)
+set(BUILD_INFO_DIR ${CMAKE_BINARY_DIR}/generated)
+add_custom_target(build_info ALL
+    COMMAND ${CMAKE_COMMAND} -DOUTPUT=${BUILD_INFO_DIR}/build_info.h -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_build_info.cmake
+    BYPRODUCTS ${BUILD_INFO_DIR}/build_info.h
+    COMMENT "Recording the build commit for the updater")
 
 # Create executable
 add_executable(AudioCapture WIN32 ${SOURCES} ${HEADERS})
@@ -47,7 +58,9 @@ add_executable(AudioCapture WIN32 ${SOURCES} ${HEADERS})
 # Include directories
 target_include_directories(AudioCapture PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${BUILD_INFO_DIR}
 )
+add_dependencies(AudioCapture build_info)
 
 # Link Windows libraries and third-party libraries
 target_link_libraries(AudioCapture PRIVATE
@@ -91,6 +104,14 @@ if(MSVC)
 else()
     target_compile_options(AudioCapture PRIVATE -Wall -Wextra)
 endif()
+
+# Unit checks for the updater's pure pieces (not shipped). See tools/updater_tests.cpp.
+add_executable(updater_tests tools/updater_tests.cpp src/Updater.cpp)
+target_include_directories(updater_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${BUILD_INFO_DIR})
+target_link_libraries(updater_tests PRIVATE nlohmann_json::nlohmann_json Bcrypt.lib)
+target_compile_definitions(updater_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+set_target_properties(updater_tests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_dependencies(updater_tests build_info)
 
 # Console harness for the capture path (not shipped; build.bat and CI build only AudioCapture).
 # See tools/capture_smoke.cpp for usage.
