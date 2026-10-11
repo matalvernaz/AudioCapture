@@ -49,3 +49,8 @@ Desktop.ini
 *.log
 
 .claude/
+# Python test tooling
+__pycache__/
+
+# The build-identity script must ship even though *.cmake is ignored above
+!tools/generate_build_info.cmake
