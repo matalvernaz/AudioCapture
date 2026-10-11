@@ -13,6 +13,7 @@ This is a fork of [masonasons/AudioCapture](https://github.com/masonasons/AudioC
 - **A capture of one process never silently becomes a capture of everything.** Upstream fell back to whole-system loopback whenever the process-loopback stream could not be opened, which is what upstream issue 15 describes (a second capture in the same session recording all system audio). Now the capture fails instead, and a *Capture Failed* dialog names each source that did not start, the step that failed and its HRESULT, and says that nothing was recorded for it. `[System Audio - All Processes]` remains the only way to capture everything.
 - **One `IAudioClient` reference per process capture was leaked**; the activated client is now handed over without an extra reference, so a stopped capture is fully released.
 - **Waiting for process-loopback activation no longer pumps window messages**, which used to run the UI timer and button handlers inside `CaptureManager::StartCapture` with its mutex held.
+- **Three small engine improvements ported from sxwzxc's fork:** a capture that fails to start no longer leaves an empty output file behind; open WAV headers are rewritten and flushed every two seconds, so a crash or power cut leaves a playable file that is at most two seconds short; and a failed disk write (full drive, failed split at 4 GB) shows *Write failed* in the Data column and a warning in the status line instead of silently dropping audio.
 - **Test tools** in `tools/` (see `BUILD.md`): a console harness that repeats open/record/close on one process, two scripts that prove a per-process recording contains only its own program's audio, and a driver for the real window.
 
 ## Features
@@ -389,6 +390,10 @@ The process could not be opened with a process-loopback stream, so nothing was r
 - A process running as administrator can only be captured when AudioCapture also runs as administrator.
 - Per-process capture needs Windows 10 build 19041 or later.
 - To record everything the computer plays on purpose, check `[System Audio - All Processes]`.
+
+### Write failed in the Data column
+
+The file stopped growing because a disk write failed, usually a full drive or a failed split at 4 GB. Audio is being dropped from that point on. Stop the capture, free space or choose another output folder, and start again. The part written before the failure is intact.
 
 ### No Audio Captured
 

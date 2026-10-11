@@ -575,6 +575,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (wParam == 1) {
             // Update recording list periodically
             UpdateRecordingList();
+            // Every 2 seconds, bring open WAV headers up to date so a crash leaves playable files
+            static unsigned int ticks = 0;
+            if (++ticks % 4 == 0) {
+                g_captureManager->FlushAll();
+            }
         }
         return 0;
 
@@ -1572,6 +1577,7 @@ void UpdateRecordingList() {
 
     auto sessions = g_captureManager->GetActiveSessions();
     int newSelectedIndex = -1;
+    std::vector<std::wstring> failedNames;  // Sources whose file stopped growing
 
     for (size_t i = 0; i < sessions.size(); i++) {
         CaptureSession* session = sessions[i];
@@ -1599,6 +1605,9 @@ void UpdateRecordingList() {
         // Data written (fourth column)
         if (session->monitorOnly) {
             ListView_SetItemText(g_hRecordingList, index, 3, (LPWSTR)L"N/A");
+        } else if (session->writeFailed) {
+            ListView_SetItemText(g_hRecordingList, index, 3, (LPWSTR)L"Write failed");
+            failedNames.push_back(session->processName);
         } else {
             std::wstring sizeStr = FormatFileSize(session->bytesWritten);
             ListView_SetItemText(g_hRecordingList, index, 3, (LPWSTR)sizeStr.c_str());
@@ -1608,6 +1617,19 @@ void UpdateRecordingList() {
         if (selectedIndex >= 0 && session->processId == selectedPID) {
             newSelectedIndex = index;
         }
+    }
+
+    // A failed disk write means a file stopped growing; say so where the user will look
+    if (g_captureManager->MixedWriteFailed()) {
+        failedNames.push_back(L"the combined file");
+    }
+    if (!failedNames.empty()) {
+        std::wstring warning = L"Disk write failed for ";
+        for (size_t i = 0; i < failedNames.size(); i++) {
+            warning += (i ? L", " : L"") + failedNames[i];
+        }
+        warning += L". Audio is being dropped; stop the capture and check the drive.";
+        SetWindowText(g_hStatusText, warning.c_str());
     }
 
     // Restore selection if the item still exists

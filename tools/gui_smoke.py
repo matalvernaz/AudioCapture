@@ -7,7 +7,7 @@ something else. The user's saved settings are put back afterwards. Works without
 (which exposes this app's controls as bare panes on some machines).
 
 usage: python -I tools/gui_smoke.py <AudioCapture.exe> <pid-to-capture> [--rounds 2] [--seconds 2]
-                                     [--outdir DIR] [--monitor off|file|only]
+                                     [--outdir DIR] [--monitor off|file|only] [--kill-after SECONDS]
 Prints the Active Recordings rows after every Start and Stop, plus the text of any message box,
 and lists the files written. Pair with tools/play_tone.ps1 and tools/check_tones.py.
 """
@@ -235,6 +235,8 @@ def main():
     ap.add_argument('--rounds', type=int, default=2)
     ap.add_argument('--seconds', type=float, default=2.0)
     ap.add_argument('--outdir', default=os.path.join(tempfile.gettempdir(), 'audiocapture-guismoke'))
+    ap.add_argument('--kill-after', type=float, default=0.0,
+                    help='kill the app this many seconds into the first recording (crash test)')
     ap.add_argument('--monitor', choices=['off', 'file', 'only'], default='off',
                     help="'file' ticks Monitor audio (record and pass through), 'only' also ticks Monitor only")
     args = ap.parse_args()
@@ -309,7 +311,15 @@ def main():
         print(f'  status: {window_text(hstatus)}')
         for r in recordings(mem, hrec):
             print(f'  recording: {r[0]} PID {r[1]} -> {r[2]}')
+        if args.kill_after > 0:
+            time.sleep(args.kill_after)
+            app.kill()
+            print(f'  killed the app {args.kill_after:g} s into the recording')
+            break
         time.sleep(args.seconds)
+        for r in recordings(mem, hrec):
+            print(f'  before stop: {r[0]} PID {r[1]} data={lv_text(mem, hrec, 0, 3)!r}')
+        print(f'  status before stop: {window_text(hstatus)}')
         print(f"  button '{window_text(hstart)}' -> stop")
         click(hmain, hstart, IDC_START_BTN)
         time.sleep(1.0)

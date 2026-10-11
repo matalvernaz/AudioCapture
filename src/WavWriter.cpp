@@ -14,6 +14,7 @@ WavWriter::~WavWriter() {
 }
 
 bool WavWriter::Open(const std::wstring& filename, const WAVEFORMATEX* format) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (m_file.is_open()) {
         return false;
     }
@@ -57,6 +58,7 @@ bool WavWriter::Open(const std::wstring& filename, const WAVEFORMATEX* format) {
 }
 
 bool WavWriter::WriteData(const BYTE* data, UINT32 size) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_file.is_open()) {
         return false;
     }
@@ -115,6 +117,7 @@ bool WavWriter::SplitToNextFile() {
 }
 
 void WavWriter::Close() {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_file.is_open()) {
         return;
     }
@@ -124,6 +127,15 @@ void WavWriter::Close() {
 
     m_file.close();
     m_dataSize = 0;
+}
+
+void WavWriter::FlushToDisk() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_file.is_open()) {
+        return;
+    }
+    UpdateWavHeader();
+    m_file.flush();
 }
 
 void WavWriter::WriteWavHeader() {

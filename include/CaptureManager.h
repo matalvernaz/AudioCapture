@@ -33,6 +33,7 @@ struct CaptureSession {
     UINT64 bytesWritten;
     bool skipSilence;
     bool monitorOnly;
+    bool writeFailed;   // A disk write failed; audio is being dropped from that point on
 };
 
 class CaptureManager {
@@ -75,6 +76,12 @@ public:
     // Resume all captures
     void ResumeAllCaptures();
 
+    // Rewrite every open WAV header with the current sizes and flush, so a crash leaves playable files
+    void FlushAll();
+
+    // True once a write to the combined file has failed (its audio is being dropped)
+    bool MixedWriteFailed() const { return m_mixedWriteFailed; }
+
     // Get active capture sessions
     std::vector<CaptureSession*> GetActiveSessions();
 
@@ -102,5 +109,6 @@ private:
     AudioFormat m_mixedFormat;
     std::unique_ptr<std::thread> m_mixerThread;
     std::atomic<bool> m_mixerThreadRunning;
+    std::atomic<bool> m_mixedWriteFailed;
     std::mutex m_mixerMutex;
 };

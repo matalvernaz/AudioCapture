@@ -2,8 +2,25 @@
 #include <algorithm>
 #include <chrono>
 
+namespace {
+
+// A capture that fails after its writer was opened would leave an empty or header-only file
+// behind. Close the writers first (their destructors would otherwise finalize the file) and
+// remove it.
+void DiscardFailedStart(CaptureSession& session, const std::wstring& outputPath) {
+    session.wavWriter.reset();
+    session.mp3Encoder.reset();
+    session.opusEncoder.reset();
+    session.flacEncoder.reset();
+    if (!outputPath.empty()) {
+        DeleteFileW(outputPath.c_str());
+    }
+}
+
+}  // namespace
+
 CaptureManager::CaptureManager()
-    : m_mixedRecordingEnabled(false), m_mixerThreadRunning(false) {
+    : m_mixedRecordingEnabled(false), m_mixerThreadRunning(false), m_mixedWriteFailed(false) {
 }
 
 CaptureManager::~CaptureManager() {
@@ -35,6 +52,7 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
     session->bytesWritten = 0;
     session->skipSilence = skipSilence;
     session->monitorOnly = monitorOnly;
+    session->writeFailed = false;
 
     // Create audio capture
     session->capture = std::make_unique<AudioCapture>();
@@ -87,6 +105,7 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
 
         if (!encoderReady) {
             m_lastStartError = L"could not create the output file " + outputPath;
+            DiscardFailedStart(*session, outputPath);
             return false;
         }
     }
@@ -99,6 +118,7 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
     // Start capture
     if (!session->capture->Start()) {
         m_lastStartError = L"the capture stream would not start";
+        DiscardFailedStart(*session, outputPath);
         return false;
     }
 
@@ -131,6 +151,7 @@ bool CaptureManager::StartCaptureFromDevice(DWORD sessionId, const std::wstring&
     session->bytesWritten = 0;
     session->skipSilence = skipSilence;
     session->monitorOnly = monitorOnly;
+    session->writeFailed = false;
 
     // Create audio capture for device
     session->capture = std::make_unique<AudioCapture>();
@@ -171,6 +192,7 @@ bool CaptureManager::StartCaptureFromDevice(DWORD sessionId, const std::wstring&
 
         if (!encoderReady) {
             m_lastStartError = L"could not create the output file " + outputPath;
+            DiscardFailedStart(*session, outputPath);
             return false;
         }
     }
@@ -183,6 +205,7 @@ bool CaptureManager::StartCaptureFromDevice(DWORD sessionId, const std::wstring&
     // Start capture
     if (!session->capture->Start()) {
         m_lastStartError = L"the capture stream would not start";
+        DiscardFailedStart(*session, outputPath);
         return false;
     }
 
@@ -262,6 +285,24 @@ void CaptureManager::ResumeAllCaptures() {
         if (pair.second->capture) {
             pair.second->capture->Resume();
         }
+    }
+}
+
+void CaptureManager::FlushAll() {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& pair : m_sessions) {
+            if (pair.second->wavWriter) {
+                pair.second->wavWriter->FlushToDisk();
+            }
+        }
+    }
+
+    // The mixer thread writes to this writer without holding m_mixerMutex; WavWriter's own
+    // lock keeps the flush and those writes apart.
+    std::lock_guard<std::mutex> lock(m_mixerMutex);
+    if (m_mixedWavWriter) {
+        m_mixedWavWriter->FlushToDisk();
     }
 }
 
@@ -361,6 +402,10 @@ void CaptureManager::OnAudioData(DWORD processId, const BYTE* data, UINT32 size)
 
         if (success) {
             session->bytesWritten += size;
+        } else {
+            // Full drive, failed 4 GB split, pulled drive: the file is no longer growing.
+            // Flag it so the UI can say so instead of showing a recording that writes nothing.
+            session->writeFailed = true;
         }
     }
 
@@ -435,6 +480,7 @@ bool CaptureManager::EnableMixedRecording(const std::wstring& outputPath, AudioF
     }
 
     // Start mixer thread
+    m_mixedWriteFailed = false;
     m_mixerThreadRunning = true;
     m_mixerThread = std::make_unique<std::thread>(&CaptureManager::MixerThread, this);
 
@@ -522,30 +568,34 @@ void CaptureManager::MixerThread() {
 
         // Write data to encoder WITHOUT lock held - encoding can be slow!
         if (hasData && !mixedBuffer.empty() && m_mixerThreadRunning) {
+            bool written = true;
             switch (currentFormat) {
             case AudioFormat::WAV:
                 if (wavWriter) {
-                    wavWriter->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
+                    written = wavWriter->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
                 }
                 break;
 
             case AudioFormat::MP3:
                 if (mp3Encoder) {
-                    mp3Encoder->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
+                    written = mp3Encoder->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
                 }
                 break;
 
             case AudioFormat::OPUS:
                 if (opusEncoder) {
-                    opusEncoder->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
+                    written = opusEncoder->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
                 }
                 break;
 
             case AudioFormat::FLAC:
                 if (flacEncoder) {
-                    flacEncoder->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
+                    written = flacEncoder->WriteData(mixedBuffer.data(), static_cast<UINT32>(mixedBuffer.size()));
                 }
                 break;
+            }
+            if (!written) {
+                m_mixedWriteFailed = true;
             }
         }
 
