@@ -45,6 +45,12 @@ public:
     // Check if currently paused
     bool IsPaused() const { return m_isPaused; }
 
+    // True when the stream is a process-loopback stream (one process tree), false for whole-endpoint loopback
+    bool IsProcessSpecific() const { return m_isProcessSpecific; }
+
+    // Where the last Initialize* call failed, as "stage (0xHRESULT)"; empty after a success
+    std::wstring GetLastErrorText() const;
+
     // Get audio format information
     WAVEFORMATEX* GetFormat() const { return m_waveFormat; }
 
@@ -66,6 +72,7 @@ private:
     bool InitializeProcessSpecificCapture(DWORD processId);
     bool InitializeSystemWideCapture();
     void ApplyVolumeToBuffer(BYTE* data, UINT32 size);
+    void RecordFailure(const wchar_t* stage, HRESULT hr);
 
     IMMDeviceEnumerator* m_deviceEnumerator;
     IMMDevice* m_device;
@@ -82,6 +89,9 @@ private:
     float m_volumeMultiplier;
     bool m_isProcessSpecific;
     bool m_isInputDevice;  // True if capturing from input device (mic), false if loopback
+
+    const wchar_t* m_lastErrorStage;  // Literal describing the step that failed last
+    HRESULT m_lastErrorCode;
 
     // Passthrough/monitor members
     bool m_passthroughEnabled;
@@ -109,11 +119,12 @@ public:
     // Wait for activation to complete
     bool WaitForCompletion(DWORD timeoutMs = 5000);
 
-    // Get the activated audio client
-    IAudioClient* GetAudioClient();
+    // Hand the activated client, with the one reference this handler holds, to the caller.
+    // The handler forgets it, so nothing is leaked and nothing is double-released.
+    IAudioClient* DetachAudioClient();
 
-    // Release ownership of the audio client (so destructor won't Release it)
-    void ReleaseOwnership() { m_audioClient = nullptr; }
+    // HRESULT of the activation (valid once WaitForCompletion has returned)
+    HRESULT GetActivationResult() const { return m_activationResult; }
 
     // Check if the handler is valid (event created successfully)
     bool IsValid() const { return m_completionEvent != nullptr; }

@@ -372,6 +372,15 @@ The application uses standard Win32 controls for full accessibility:
 
 ## Troubleshooting
 
+### Capture Failed dialog
+
+The process could not be opened with a process-loopback stream, so nothing was recorded for it. The dialog names the step that failed and the HRESULT, for example `process loopback activation (0x88890008)`.
+
+- Try again; the target may have been exiting.
+- A process running as administrator can only be captured when AudioCapture also runs as administrator.
+- Per-process capture needs Windows 10 build 19041 or later.
+- To record everything the computer plays on purpose, check `[System Audio - All Processes]`.
+
 ### No Audio Captured
 
 - Ensure the target application is actually playing audio
