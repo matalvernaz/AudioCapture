@@ -99,6 +99,22 @@ The package includes:
 - LICENSE.txt (if available)
 - AudioCaptures\ (default output folder)
 
+## Build Identity and Release Signing
+
+`tools/generate_build_info.cmake` runs on every build and writes `build/generated/build_info.h` with the commit the tree is at (from git, or `GITHUB_SHA` on CI). The updater compares that commit with the published one.
+
+The release workflow signs `build-info.json` with the ECDSA P-256 private key in the repository secret `UPDATE_SIGNING_KEY` (a base64 PKCS#8 blob) and refuses to publish without it. The public key lives in `src/Updater.cpp` as a `BCRYPT_ECCPUBLIC_BLOB`. To rotate the key, generate a new pair, store the private half as the secret, replace the blob in `Updater.cpp`, and ship that build once by hand, since older builds will not trust releases signed with the new key:
+
+```powershell
+$params = New-Object System.Security.Cryptography.CngKeyCreationParameters
+$params.ExportPolicy = [System.Security.Cryptography.CngExportPolicies]::AllowPlaintextExport
+$key = [System.Security.Cryptography.CngKey]::Create([System.Security.Cryptography.CngAlgorithm]::ECDsaP256, $null, $params)
+[Convert]::ToBase64String($key.Export([System.Security.Cryptography.CngKeyBlobFormat]::Pkcs8PrivateBlob)) | gh secret set UPDATE_SIGNING_KEY --repo <owner>/AudioCapture
+($key.Export([System.Security.Cryptography.CngKeyBlobFormat]::EccPublicBlob) | ForEach-Object { '0x{0:x2}' -f $_ }) -join ', '
+```
+
+The private key only ever exists in memory and in the secret.
+
 ## Test Tools
 
 The `tools` folder holds checks that need no test framework. Build the console harness with
@@ -112,6 +128,12 @@ the app).
   processes playing 440 Hz and 1320 Hz, captures each one twice plus the whole device once, and
   prints how loud each tone is in every file. A per-process take shows its own tone near
   -14 dBFS and the other tone below -60 dBFS.
+- `updater_tests.exe` (target `updater_tests`) checks the updater's pure pieces with no network:
+  host allow list, redirect handling, time parsing, manifest validation, the downgrade rule, and
+  ECDSA verification against a key pair made on the spot.
+- `update_smoke.py <AudioCapture.exe> [--expect available|uptodate|older]` runs the real update
+  flow against the GitHub release in a temp copy and checks the installed file against the signed
+  SHA-256.
 - `gui_smoke.py <AudioCapture.exe> <pid>` drives the real window through Win32 messages
   (launched without focus, no keystrokes): ticks the process, presses Start, Stop and Start
   again, prints the Active Recordings rows and any message box, and lists the files written.

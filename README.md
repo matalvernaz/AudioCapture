@@ -14,6 +14,7 @@ This is a fork of [masonasons/AudioCapture](https://github.com/masonasons/AudioC
 - **One `IAudioClient` reference per process capture was leaked**; the activated client is now handed over without an extra reference, so a stopped capture is fully released.
 - **Waiting for process-loopback activation no longer pumps window messages**, which used to run the UI timer and button handlers inside `CaptureManager::StartCapture` with its mutex held.
 - **Three small engine improvements ported from sxwzxc's fork:** a capture that fails to start no longer leaves an empty output file behind; open WAV headers are rewritten and flushed every two seconds, so a crash or power cut leaves a playable file that is at most two seconds short; and a failed disk write (full drive, failed split at 4 GB) shows *Write failed* in the Data column and a warning in the status line instead of silently dropping audio.
+- **Check for Updates button (Alt+U).** Asks this fork's GitHub release whether a newer build exists and, if you say yes, installs it in place and restarts. See *Updates* below for exactly what it does and checks.
 - **Test tools** in `tools/` (see `BUILD.md`): a console harness that repeats open/record/close on one process, two scripts that prove a per-process recording contains only its own program's audio, and a driver for the real window.
 
 ## Features
@@ -270,6 +271,21 @@ Files are automatically named using the pattern:
 ```
 
 For example: `chrome-2025_10_12-14_30_45.flac`
+
+## Updates
+
+Nothing runs on its own. Pressing **Check for Updates** (Alt+U) makes one HTTPS request to GitHub for this fork's release description, so GitHub sees your IP address at that moment and nothing else is sent. The answer is one of three message boxes: you are up to date, the published build is older than yours, or a newer build is available with its commit and date. Only if you answer Yes does the app download the new program, swap it in and restart. Stop any captures first; the app refuses to check while one is running.
+
+What is verified before anything replaces the running program:
+
+- The connection is TLS 1.2 or newer with normal certificate checks, and only `github.com` and GitHub's `*.githubusercontent.com` asset hosts are contacted; redirects are followed by hand and re-checked against that list.
+- The release description is signed with ECDSA P-256 by the build workflow. The matching public key is built into the program. The signature covers the commit, its date, the program size and its SHA-256, so neither the program nor the description can be swapped, and an old build cannot be passed off as a new one.
+- The download must be exactly the signed size and SHA-256 and start like a Windows program.
+- A build whose commit is older than or the same age as the running one is refused.
+
+What is not covered: a compromise of the signing secret in the GitHub Actions settings or of the GitHub account that publishes releases. There is no code signing certificate.
+
+The old program is kept next to the new one as `AudioCapture.old.exe` until the next start, which removes it. If the folder is read-only the update stops with a message and nothing changes; download the zip from the release page instead.
 
 ## Technical Details
 
