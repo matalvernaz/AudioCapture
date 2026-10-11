@@ -54,7 +54,9 @@ jobs:
           $commit = (git rev-parse HEAD).Trim()
           $commitDate = (git show -s --format=%cI HEAD).Trim()
           $canonical = "AudioCapture build-info v1`ncommit=$commit`ncommit_date=$commitDate`nexe_size=$($bytes.Length)`nexe_sha256=$sha`n"
-          $cngKey = [System.Security.Cryptography.CngKey]::Import([Convert]::FromBase64String($env:UPDATE_SIGNING_KEY), [System.Security.Cryptography.CngKeyBlobFormat]::Pkcs8PrivateBlob)
+          # a secret set from a PowerShell pipe can carry a UTF-8 byte-order mark and a newline; neither is part of the key
+          $keyText = $env:UPDATE_SIGNING_KEY.Trim([char[]]@(0xFEFF, 32, 9, 13, 10))
+          $cngKey = [System.Security.Cryptography.CngKey]::Import([Convert]::FromBase64String($keyText), [System.Security.Cryptography.CngKeyBlobFormat]::Pkcs8PrivateBlob)
           $signer = [System.Security.Cryptography.ECDsaCng]::new($cngKey)
           $signature = $signer.SignData([Text.Encoding]::UTF8.GetBytes($canonical), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.DSASignatureFormat]::IeeeP1363FixedFieldConcatenation)
           if ($signature.Length -ne 64) { throw "unexpected signature length $($signature.Length)" }

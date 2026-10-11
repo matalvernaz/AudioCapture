@@ -106,6 +106,7 @@ The package includes:
 The release workflow signs `build-info.json` with the ECDSA P-256 private key in the repository secret `UPDATE_SIGNING_KEY` (a base64 PKCS#8 blob) and refuses to publish without it. The public key lives in `src/Updater.cpp` as a `BCRYPT_ECCPUBLIC_BLOB`. To rotate the key, generate a new pair, store the private half as the secret, replace the blob in `Updater.cpp`, and ship that build once by hand, since older builds will not trust releases signed with the new key:
 
 ```powershell
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)   # no byte-order mark in the piped secret
 $params = New-Object System.Security.Cryptography.CngKeyCreationParameters
 $params.ExportPolicy = [System.Security.Cryptography.CngExportPolicies]::AllowPlaintextExport
 $key = [System.Security.Cryptography.CngKey]::Create([System.Security.Cryptography.CngAlgorithm]::ECDsaP256, $null, $params)
