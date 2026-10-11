@@ -17,9 +17,11 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
                                   const std::wstring& passthroughDeviceId,
                                   bool monitorOnly) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    m_lastStartError.clear();
 
     // Check if already capturing this process
     if (m_sessions.find(processId) != m_sessions.end()) {
+        m_lastStartError = L"already being captured";
         return false;
     }
 
@@ -37,6 +39,8 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
     // Create audio capture
     session->capture = std::make_unique<AudioCapture>();
     if (!session->capture->Initialize(processId)) {
+        m_lastStartError = L"could not open a capture stream for this process: " +
+                           session->capture->GetLastErrorText();
         return false;
     }
 
@@ -82,6 +86,7 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
         }
 
         if (!encoderReady) {
+            m_lastStartError = L"could not create the output file " + outputPath;
             return false;
         }
     }
@@ -93,6 +98,7 @@ bool CaptureManager::StartCapture(DWORD processId, const std::wstring& processNa
 
     // Start capture
     if (!session->capture->Start()) {
+        m_lastStartError = L"the capture stream would not start";
         return false;
     }
 
@@ -107,9 +113,11 @@ bool CaptureManager::StartCaptureFromDevice(DWORD sessionId, const std::wstring&
                                             const std::wstring& outputPath, AudioFormat format,
                                             UINT32 bitrate, bool skipSilence, bool monitorOnly) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    m_lastStartError.clear();
 
     // Check if already capturing this session
     if (m_sessions.find(sessionId) != m_sessions.end()) {
+        m_lastStartError = L"already being captured";
         return false;
     }
 
@@ -127,6 +135,7 @@ bool CaptureManager::StartCaptureFromDevice(DWORD sessionId, const std::wstring&
     // Create audio capture for device
     session->capture = std::make_unique<AudioCapture>();
     if (!session->capture->InitializeFromDevice(deviceId, isInputDevice)) {
+        m_lastStartError = L"could not open the device: " + session->capture->GetLastErrorText();
         return false;
     }
 
@@ -161,6 +170,7 @@ bool CaptureManager::StartCaptureFromDevice(DWORD sessionId, const std::wstring&
         }
 
         if (!encoderReady) {
+            m_lastStartError = L"could not create the output file " + outputPath;
             return false;
         }
     }
@@ -172,6 +182,7 @@ bool CaptureManager::StartCaptureFromDevice(DWORD sessionId, const std::wstring&
 
     // Start capture
     if (!session->capture->Start()) {
+        m_lastStartError = L"the capture stream would not start";
         return false;
     }
 

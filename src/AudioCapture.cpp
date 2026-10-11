@@ -9,6 +9,7 @@
 #include <ks.h>
 #include <ksmedia.h>
 #include <algorithm>
+#include <cstdio>
 
 //=============================================================================
 // AudioClientActivationHandler Implementation
@@ -102,24 +103,31 @@ bool AudioClientActivationHandler::WaitForCompletion(DWORD timeoutMs) {
         return false;
     }
 
-    // Use CoWaitForMultipleHandles to pump messages while waiting (required for STA)
+    // The handler is agile, so ActivateCompleted arrives on a worker thread and only COM calls
+    // need dispatching while we wait. Pumping window messages here would run the UI (timer
+    // refreshes, button handlers) inside CaptureManager::StartCapture with its mutex held.
     HANDLE handles[1] = { m_completionEvent };
     DWORD index = 0;
     HRESULT hr = CoWaitForMultipleHandles(
-        COWAIT_DISPATCH_CALLS | COWAIT_DISPATCH_WINDOW_MESSAGES,
+        COWAIT_DISPATCH_CALLS,
         timeoutMs,
         1,
         handles,
         &index);
 
-    return (hr == S_OK) && SUCCEEDED(m_activationResult);
+    if (hr != S_OK) {
+        // RPC_S_CALLPENDING means the timeout passed before ActivateCompleted ran
+        m_activationResult = (hr == RPC_S_CALLPENDING) ? HRESULT_FROM_WIN32(ERROR_TIMEOUT) : hr;
+        return false;
+    }
+
+    return SUCCEEDED(m_activationResult);
 }
 
-IAudioClient* AudioClientActivationHandler::GetAudioClient() {
-    if (m_audioClient) {
-        m_audioClient->AddRef();
-    }
-    return m_audioClient;
+IAudioClient* AudioClientActivationHandler::DetachAudioClient() {
+    IAudioClient* client = m_audioClient;
+    m_audioClient = nullptr;
+    return client;
 }
 
 //=============================================================================
@@ -138,6 +146,8 @@ AudioCapture::AudioCapture()
     , m_volumeMultiplier(1.0f)  // Default to 100% volume
     , m_isProcessSpecific(false)
     , m_isInputDevice(false)
+    , m_lastErrorStage(L"")
+    , m_lastErrorCode(S_OK)
     , m_passthroughEnabled(false)
     , m_renderDevice(nullptr)
     , m_renderClient(nullptr)
@@ -170,8 +180,24 @@ AudioCapture::~AudioCapture() {
     // Don't call CoUninitialize - main thread will handle it
 }
 
+std::wstring AudioCapture::GetLastErrorText() const {
+    if (!m_lastErrorStage || !*m_lastErrorStage) {
+        return L"";
+    }
+    wchar_t text[256];
+    swprintf_s(text, L"%s (0x%08X)", m_lastErrorStage, static_cast<unsigned int>(m_lastErrorCode));
+    return text;
+}
+
+void AudioCapture::RecordFailure(const wchar_t* stage, HRESULT hr) {
+    m_lastErrorStage = stage;
+    m_lastErrorCode = hr;
+}
+
 bool AudioCapture::Initialize(DWORD processId) {
     m_targetProcessId = processId;
+    m_isProcessSpecific = false;
+    RecordFailure(L"", S_OK);
 
     // Clean up any existing state from previous initialization
     if (m_captureClient) {
@@ -201,6 +227,7 @@ bool AudioCapture::Initialize(DWORD processId) {
         (void**)&m_deviceEnumerator);
 
     if (FAILED(hr)) {
+        RecordFailure(L"creating the audio device enumerator", hr);
         return false;
     }
 
@@ -208,19 +235,21 @@ bool AudioCapture::Initialize(DWORD processId) {
     hr = m_deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &m_device);
 
     if (FAILED(hr)) {
+        RecordFailure(L"finding the default playback device", hr);
         return false;
     }
 
-    // Try process-specific capture for non-zero process IDs
+    // A specific process was asked for, so only a process-loopback stream will do. Falling back
+    // to whole-endpoint loopback here would silently record every program (upstream issue 15).
     if (processId != 0) {
-        if (InitializeProcessSpecificCapture(processId)) {
-            m_isProcessSpecific = true;
-            return true;
+        if (!InitializeProcessSpecificCapture(processId)) {
+            return false;
         }
+        m_isProcessSpecific = true;
+        return true;
     }
 
-    // Fall back to system-wide capture
-    m_isProcessSpecific = false;
+    // Process ID 0 means the whole default playback device, on purpose
     return InitializeSystemWideCapture();
 }
 
@@ -265,6 +294,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         if (handler) {
             handler->Release();
         }
+        RecordFailure(L"creating the activation handler", E_OUTOFMEMORY);
         return false;
     }
 
@@ -275,6 +305,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
 
     HMODULE hMmDevApi = LoadLibraryW(L"Mmdevapi.dll");
     if (!hMmDevApi) {
+        RecordFailure(L"loading Mmdevapi.dll", HRESULT_FROM_WIN32(GetLastError()));
         handler->Release();
         return false;
     }
@@ -284,6 +315,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
 
     if (!pActivateAudioInterfaceAsync) {
         // Function not available (Windows 7 or earlier) - fail gracefully
+        RecordFailure(L"ActivateAudioInterfaceAsync is not available on this Windows", E_NOTIMPL);
         FreeLibrary(hMmDevApi);
         handler->Release();
         return false;
@@ -301,6 +333,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
     FreeLibrary(hMmDevApi);
 
     if (FAILED(hr) || !asyncOp) {
+        RecordFailure(L"starting process loopback activation", FAILED(hr) ? hr : E_FAIL);
         handler->Release();
         return false;
     }
@@ -312,27 +345,24 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
     asyncOp->Release();
 
     if (!success) {
+        RecordFailure(L"process loopback activation", handler->GetActivationResult());
         handler->Release();
         return false;
     }
 
-    // Get the audio client (this AddRefs it for us)
-    m_audioClient = handler->GetAudioClient();
+    // Take over the handler's single reference to the client, then drop the handler
+    m_audioClient = handler->DetachAudioClient();
+    handler->Release();
 
     if (!m_audioClient) {
-        handler->Release();
+        RecordFailure(L"process loopback activation returned no audio client", E_POINTER);
         return false;
     }
-
-    // Release ownership so handler doesn't Release our audio client in its destructor
-    handler->ReleaseOwnership();
-
-    // Release our reference to the handler (may delete it if refcount reaches 0)
-    handler->Release();
 
     // Get mix format - for process loopback, GetMixFormat returns E_NOTIMPL
     // so we need to use the default device's format as a template
     hr = m_audioClient->GetMixFormat(&m_waveFormat);
+    HRESULT formatHr = hr;
 
     if (FAILED(hr)) {
         // GetMixFormat not supported on process loopback device
@@ -341,9 +371,12 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
             IAudioClient* tempClient = nullptr;
             hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&tempClient);
 
+            formatHr = hr;
+
             if (SUCCEEDED(hr) && tempClient) {
                 WAVEFORMATEX* defaultFormat = nullptr;
                 hr = tempClient->GetMixFormat(&defaultFormat);
+                formatHr = hr;
 
                 if (SUCCEEDED(hr) && defaultFormat) {
                     // Ask the process loopback client what format it will actually use
@@ -372,6 +405,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         }
 
         if (!m_waveFormat) {
+            RecordFailure(L"determining the capture format", FAILED(formatHr) ? formatHr : E_FAIL);
             m_audioClient->Release();
             m_audioClient = nullptr;
             return false;
@@ -380,6 +414,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
 
     // Validate before Initialize
     if (!m_audioClient || !m_waveFormat) {
+        RecordFailure(L"determining the capture format", E_FAIL);
         if (m_audioClient) {
             m_audioClient->Release();
             m_audioClient = nullptr;
@@ -398,6 +433,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         nullptr);
 
     if (FAILED(hr)) {
+        RecordFailure(L"initializing the process loopback stream", hr);
         CoTaskMemFree(m_waveFormat);
         m_waveFormat = nullptr;
         m_audioClient->Release();
@@ -410,6 +446,7 @@ bool AudioCapture::InitializeProcessSpecificCapture(DWORD processId) {
         (void**)&m_captureClient);
 
     if (FAILED(hr) || !m_captureClient) {
+        RecordFailure(L"getting the capture client", FAILED(hr) ? hr : E_POINTER);
         CoTaskMemFree(m_waveFormat);
         m_waveFormat = nullptr;
         m_audioClient->Release();
@@ -425,12 +462,14 @@ bool AudioCapture::InitializeSystemWideCapture() {
     HRESULT hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
         nullptr, (void**)&m_audioClient);
     if (FAILED(hr)) {
+        RecordFailure(L"activating the playback device", hr);
         return false;
     }
 
     // Get mix format
     hr = m_audioClient->GetMixFormat(&m_waveFormat);
     if (FAILED(hr)) {
+        RecordFailure(L"reading the device format", hr);
         return false;
     }
 
@@ -444,6 +483,7 @@ bool AudioCapture::InitializeSystemWideCapture() {
         m_waveFormat,
         nullptr);
     if (FAILED(hr)) {
+        RecordFailure(L"initializing the loopback stream", hr);
         return false;
     }
 
@@ -451,6 +491,7 @@ bool AudioCapture::InitializeSystemWideCapture() {
     hr = m_audioClient->GetService(__uuidof(IAudioCaptureClient),
         (void**)&m_captureClient);
     if (FAILED(hr)) {
+        RecordFailure(L"getting the capture client", hr);
         return false;
     }
 
@@ -460,6 +501,7 @@ bool AudioCapture::InitializeSystemWideCapture() {
 bool AudioCapture::InitializeFromDevice(const std::wstring& deviceId, bool isInputDevice) {
     m_isInputDevice = isInputDevice;
     m_isProcessSpecific = false;
+    RecordFailure(L"", S_OK);
 
     // Clean up any existing state from previous initialization
     if (m_captureClient) {
@@ -495,6 +537,7 @@ bool AudioCapture::InitializeFromDevice(const std::wstring& deviceId, bool isInp
     // Get the specified device by ID
     hr = m_deviceEnumerator->GetDevice(deviceId.c_str(), &m_device);
     if (FAILED(hr)) {
+        RecordFailure(L"opening the device", hr);
         return false;
     }
 
@@ -502,12 +545,14 @@ bool AudioCapture::InitializeFromDevice(const std::wstring& deviceId, bool isInp
     hr = m_device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
         nullptr, (void**)&m_audioClient);
     if (FAILED(hr)) {
+        RecordFailure(L"activating the device", hr);
         return false;
     }
 
     // Get mix format
     hr = m_audioClient->GetMixFormat(&m_waveFormat);
     if (FAILED(hr)) {
+        RecordFailure(L"reading the device format", hr);
         return false;
     }
 
@@ -529,6 +574,7 @@ bool AudioCapture::InitializeFromDevice(const std::wstring& deviceId, bool isInp
         m_waveFormat,
         nullptr);
     if (FAILED(hr)) {
+        RecordFailure(L"initializing the device stream", hr);
         return false;
     }
 
@@ -536,6 +582,7 @@ bool AudioCapture::InitializeFromDevice(const std::wstring& deviceId, bool isInp
     hr = m_audioClient->GetService(__uuidof(IAudioCaptureClient),
         (void**)&m_captureClient);
     if (FAILED(hr)) {
+        RecordFailure(L"getting the capture client", hr);
         return false;
     }
 

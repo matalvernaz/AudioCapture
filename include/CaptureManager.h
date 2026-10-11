@@ -81,12 +81,16 @@ public:
     // Check if a process is being captured
     bool IsCapturing(DWORD processId) const;
 
+    // Why the most recent StartCapture* call returned false (empty after a success)
+    const std::wstring& GetLastStartError() const { return m_lastStartError; }
+
 private:
     void OnAudioData(DWORD processId, const BYTE* data, UINT32 size);
     void MixerThread();
 
     std::map<DWORD, std::unique_ptr<CaptureSession>> m_sessions;
     std::mutex m_mutex;
+    std::wstring m_lastStartError;  // Written only by StartCapture* on the caller's thread
 
     // Mixed recording members
     bool m_mixedRecordingEnabled;

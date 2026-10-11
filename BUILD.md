@@ -99,6 +99,23 @@ The package includes:
 - LICENSE.txt (if available)
 - AudioCaptures\ (default output folder)
 
+## Test Tools
+
+The `tools` folder holds checks that need no test framework. Build the console harness with
+`cmake --build build --config Release --target capture_smoke` (build.bat and CI build only
+the app).
+
+- `capture_smoke.exe [pid] [iterations] [seconds] [out-prefix]` opens a process-loopback
+  capture on one process, records, closes it and repeats, reporting whether every take was
+  really process-specific. Point it at a screen reader's PID for a quick check.
+- `play_tone.ps1`, `check_tones.py` and `tone_test.ps1`: `tone_test.ps1` starts two PowerShell
+  processes playing 440 Hz and 1320 Hz, captures each one twice plus the whole device once, and
+  prints how loud each tone is in every file. A per-process take shows its own tone near
+  -14 dBFS and the other tone below -60 dBFS.
+- `gui_smoke.py <AudioCapture.exe> <pid>` drives the real window through Win32 messages
+  (launched without focus, no keystrokes): ticks the process, presses Start, Stop and Start
+  again, prints the Active Recordings rows and any message box, and lists the files written.
+
 ## Cleaning Build Artifacts
 
 To remove all build artifacts and start fresh:

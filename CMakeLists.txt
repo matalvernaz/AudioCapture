@@ -91,3 +91,11 @@ if(MSVC)
 else()
     target_compile_options(AudioCapture PRIVATE -Wall -Wextra)
 endif()
+
+# Console harness for the capture path (not shipped; build.bat and CI build only AudioCapture).
+# See tools/capture_smoke.cpp for usage.
+add_executable(capture_smoke tools/capture_smoke.cpp src/AudioCapture.cpp src/WavWriter.cpp)
+target_include_directories(capture_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(capture_smoke PRIVATE Avrt.lib Mmdevapi.lib Ole32.lib)
+target_compile_definitions(capture_smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+set_target_properties(capture_smoke PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

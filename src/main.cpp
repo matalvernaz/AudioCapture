@@ -1323,6 +1323,7 @@ void StartCapture() {
 
     int startedCount = 0;
     int alreadyCapturingCount = 0;
+    std::vector<std::wstring> failures;  // "source: reason" for every source that did not start
 
     for (int checkedIndex : checkedIndices) {
         std::wstring processName;
@@ -1396,6 +1397,10 @@ void StartCapture() {
                 }
             }
             startedCount++;
+        }
+        else {
+            failures.push_back(processName + L" (PID " + std::to_wstring(processId) + L"): " +
+                               g_captureManager->GetLastStartError());
         }
     }
 
@@ -1489,6 +1494,9 @@ void StartCapture() {
                 }
                 startedCount++;
             }
+            else {
+                failures.push_back(micDeviceName + L": " + g_captureManager->GetLastStartError());
+            }
         }
     }
 
@@ -1500,11 +1508,22 @@ void StartCapture() {
         }
         SetWindowText(g_hStatusText, status.c_str());
     }
-    else if (alreadyCapturingCount > 0) {
+    else if (alreadyCapturingCount > 0 && failures.empty()) {
         MessageBox(g_hWnd, L"All selected sources are already being captured.", L"Already Capturing", MB_OK | MB_ICONINFORMATION);
     }
-    else {
+    else if (failures.empty()) {
         MessageBox(g_hWnd, L"Failed to start any captures.", L"Capture Error", MB_OK | MB_ICONERROR);
+    }
+
+    // Say exactly which sources did not start. A source that fails is never quietly replaced by
+    // whole-system capture, so the user knows nothing was recorded for it.
+    if (!failures.empty()) {
+        std::wstring message = L"Nothing was recorded for:\n\n";
+        for (const auto& failure : failures) {
+            message += failure + L"\n";
+        }
+        message += L"\nTo record everything on purpose, choose [System Audio - All Processes].";
+        MessageBox(g_hWnd, message.c_str(), L"Capture Failed", MB_OK | MB_ICONERROR);
     }
 }
 
