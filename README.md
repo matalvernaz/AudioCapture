@@ -14,6 +14,7 @@ This is a fork of [masonasons/AudioCapture](https://github.com/masonasons/AudioC
 - **One `IAudioClient` reference per process capture was leaked**; the activated client is now handed over without an extra reference, so a stopped capture is fully released.
 - **Waiting for process-loopback activation no longer pumps window messages**, which used to run the UI timer and button handlers inside `CaptureManager::StartCapture` with its mutex held.
 - **Three small engine improvements ported from sxwzxc's fork:** a capture that fails to start no longer leaves an empty output file behind; open WAV headers are rewritten and flushed every two seconds, so a crash or power cut leaves a playable file that is at most two seconds short; and a failed disk write (full drive, failed split at 4 GB) shows *Write failed* in the Data column and a warning in the status line instead of silently dropping audio.
+- **A process list you can actually read.** Same-name child processes are folded into their parent (Chrome's thirty helper processes become one row, and capturing the parent records them all), background processes with no window and no audio session are hidden unless *Show background processes* (Alt+G) is ticked, an *Audio* column says *playing* or *has played*, and both filter boxes are remembered. On a typical machine this turns about 380 rows into about 15.
 - **Check for Updates button (Alt+U).** Asks this fork's GitHub release whether a newer build exists and, if you say yes, installs it in place and restarts. See *Updates* below for exactly what it does and checks.
 - **Test tools** in `tools/` (see `BUILD.md`): a console harness that repeats open/record/close on one process, two scripts that prove a per-process recording contains only its own program's audio, and a driver for the real window.
 
@@ -259,6 +260,9 @@ The microphone integrates seamlessly with multi-process recording modes:
 - **Podcast Recording**: Capture multiple apps + microphone with both individual tracks and mixed output (Both mode)
 
 ### Filtering Processes
+
+The list shows one row per application. An app that runs as several same-name processes, such as a browser, appears once with "(N processes)" after its window title; capturing that row records all of them. Processes with no window and no audio session are hidden by default; tick *Show background processes* (Alt+G) to list them. *Show only processes with active audio* (Alt+H) narrows the list further to what is playing right now. The *Audio* column reads *playing* for a process making sound now and *has played* for one that has an audio session but is quiet.
+
 
 - **Show only processes with active audio**: Check this box to see only applications currently playing sound
 - **Window titles**: The "Window Title" column helps identify processes (e.g., "YouTube - Chrome" vs "Gmail - Chrome")

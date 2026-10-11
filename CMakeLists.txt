@@ -113,6 +113,13 @@ target_compile_definitions(updater_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND
 set_target_properties(updater_tests PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_dependencies(updater_tests build_info)
 
+# Prints the rows the process list would show (not shipped). See tools/process_list_check.cpp.
+add_executable(process_list_check tools/process_list_check.cpp src/ProcessEnumerator.cpp)
+target_include_directories(process_list_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(process_list_check PRIVATE Ole32.lib)
+target_compile_definitions(process_list_check PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+set_target_properties(process_list_check PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # Console harness for the capture path (not shipped; build.bat and CI build only AudioCapture).
 # See tools/capture_smoke.cpp for usage.
 add_executable(capture_smoke tools/capture_smoke.cpp src/AudioCapture.cpp src/WavWriter.cpp)

@@ -129,6 +129,9 @@ the app).
   processes playing 440 Hz and 1320 Hz, captures each one twice plus the whole device once, and
   prints how loud each tone is in every file. A per-process take shows its own tone near
   -14 dBFS and the other tone below -60 dBFS.
+- `process_list_check.exe [all]` (target `process_list_check`) prints the rows the process list
+  would show, with member counts and audio state, so folding and the background filter can be
+  checked without the window.
 - `updater_tests.exe` (target `updater_tests`) checks the updater's pure pieces with no network:
   host allow list, redirect handling, time parsing, manifest validation, the downgrade rule, and
   ECDSA verification against a key pair made on the spot.

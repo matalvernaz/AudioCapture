@@ -35,6 +35,8 @@ user32 = gui_smoke.user32
 kernel32 = gui_smoke.kernel32
 kernel32.QueryFullProcessImageNameW.argtypes = [wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
 kernel32.QueryFullProcessImageNameW.restype = wt.BOOL
+kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+kernel32.WaitForSingleObject.restype = wt.DWORD
 
 
 def sha256_of(path):
@@ -215,10 +217,10 @@ def main():
             user32.PostMessageW(dlg, gui_smoke.WM_CLOSE, 0, 0)
             time.sleep(0.5)
         close_window(hwnd)
-        for _ in range(60):
-            if not process_path(pid):
-                break
-            time.sleep(0.5)
+        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE: wait for the real exit, so settings are saved before restore
+        if handle:
+            kernel32.WaitForSingleObject(handle, 30000)
+            kernel32.CloseHandle(handle)
         return failures
     finally:
         guard.restore()

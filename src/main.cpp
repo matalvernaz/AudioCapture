@@ -47,6 +47,7 @@ HWND g_hSkipSilenceCheckbox;
 HWND g_hFlacCompressionCombo;
 HWND g_hFlacCompressionLabel;
 HWND g_hShowAudioOnlyCheckbox;
+HWND g_hShowBackgroundCheckbox;
 HWND g_hPassthroughCheckbox;
 HWND g_hPassthroughDeviceCombo;
 HWND g_hPassthroughDeviceLabel;
@@ -482,6 +483,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             break;
 
+        case IDC_SHOW_BACKGROUND_CHECKBOX:
+            if (wmEvent == BN_CLICKED) {
+                RefreshProcessList();
+                if (g_supportsProcessCapture) {
+                    SetFocus(g_hProcessList);
+                }
+            }
+            break;
+
         case IDC_PASSTHROUGH_CHECKBOX:
             if (wmEvent == BN_CLICKED) {
                 OnPassthroughCheckboxChanged();
@@ -569,6 +579,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             SetWindowPos(g_hProcessList, nullptr, 10, 60, width - 20, 180, SWP_NOZORDER);
             SetWindowPos(g_hRefreshBtn, nullptr, 10, 245, 100, 25, SWP_NOZORDER);
             SetWindowPos(g_hShowAudioOnlyCheckbox, nullptr, 120, 248, 280, 20, SWP_NOZORDER);
+            SetWindowPos(g_hShowBackgroundCheckbox, nullptr, 410, 248, 220, 20, SWP_NOZORDER);
         } else {
             // Show format label when process list is hidden
             SetWindowPos(g_hFormatLabel, nullptr, 10, topOffset - 20, 60, 20, SWP_NOZORDER);
@@ -760,6 +771,10 @@ void InitializeControls(HWND hwnd) {
     lvc.pszText = (LPWSTR)L"Path";
     ListView_InsertColumn(g_hProcessList, 3, &lvc);
 
+    lvc.cx = 90;
+    lvc.pszText = (LPWSTR)L"Audio";
+    ListView_InsertColumn(g_hProcessList, 4, &lvc);
+
     // Refresh button (adjusted position for preset controls)
     g_hRefreshBtn = CreateWindow(
         L"BUTTON", L"Refresh",
@@ -774,6 +789,14 @@ void InitializeControls(HWND hwnd) {
         processListVisibility | WS_TABSTOP | BS_AUTOCHECKBOX,
         120, 248, 280, 20,
         hwnd, (HMENU)IDC_SHOW_AUDIO_ONLY_CHECKBOX, g_hInst, nullptr
+    );
+
+    // Background processes (no window, no audio session) are hidden unless this is ticked
+    g_hShowBackgroundCheckbox = CreateWindow(
+        L"BUTTON", L"Show back&ground processes",
+        processListVisibility | WS_TABSTOP | BS_AUTOCHECKBOX,
+        410, 248, 220, 20,
+        hwnd, (HMENU)IDC_SHOW_BACKGROUND_CHECKBOX, g_hInst, nullptr
     );
 
     // Format label (only visible when process list is hidden)
@@ -1118,25 +1141,28 @@ void RefreshProcessList() {
         if (ListView_GetCheckState(g_hProcessList, i)) {
             wchar_t pidStr[32];
             ListView_GetItemText(g_hProcessList, i, 1, pidStr, 32);
-            DWORD pid = (DWORD)_wtoi(pidStr);
-            checkedPIDs.push_back(pid);
+            checkedPIDs.push_back((DWORD)_wtoi(pidStr));
         }
     }
 
     ListView_DeleteAllItems(g_hProcessList);
-    g_processes = g_processEnum->GetAllProcesses();
 
-    // Sort processes naturally by name (case-insensitive)
+    // One row per application: same-name child processes are folded into their parent, and
+    // capturing the parent records the whole tree
+    g_processes = g_processEnum->GetProcessTrees();
     std::sort(g_processes.begin(), g_processes.end(),
         [](const ProcessInfo& a, const ProcessInfo& b) {
-            return StrCmpLogicalW(a.processName.c_str(), b.processName.c_str()) < 0;
+            int order = StrCmpLogicalW(a.processName.c_str(), b.processName.c_str());
+            return order != 0 ? order < 0 : a.processId < b.processId;
         });
 
-    // Check if we should filter by active audio
     bool showAudioOnly = (SendMessage(g_hShowAudioOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    bool showBackground = (SendMessage(g_hShowBackgroundCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
     UpdateProcessListLabel();
 
     int displayedCount = 0;
+    int hiddenBackground = 0;
+    int hiddenSilent = 0;
 
     // Always add system-wide audio option as first item (unless filtering by active audio)
     if (!showAudioOnly) {
@@ -1149,69 +1175,63 @@ void RefreshProcessList() {
         ListView_SetItemText(g_hProcessList, index, 1, (LPWSTR)L"0");
         ListView_SetItemText(g_hProcessList, index, 2, (LPWSTR)L"Capture all system audio");
         ListView_SetItemText(g_hProcessList, index, 3, (LPWSTR)L"System-wide loopback");
+        ListView_SetItemText(g_hProcessList, index, 4, (LPWSTR)L"");
 
-        // Check if system audio was previously checked (PID 0)
         for (DWORD checkedPID : checkedPIDs) {
             if (checkedPID == 0) {
                 ListView_SetCheckState(g_hProcessList, index, TRUE);
                 break;
             }
         }
-
         displayedCount++;
     }
 
-    for (size_t i = 0; i < g_processes.size(); i++) {
-        ProcessInfo& proc = g_processes[i];
-
-        // Fetch window title and audio status on-demand (lazy loading for performance)
-        if (proc.windowTitle.empty()) {
-            proc.windowTitle = g_processEnum->GetWindowTitle(proc.processId);
+    for (const ProcessInfo& proc : g_processes) {
+        if (showAudioOnly && !proc.hasActiveAudio) {
+            hiddenSilent++;
+            continue;
         }
-
-        // Only check audio status if we're filtering by it
-        if (showAudioOnly) {
-            proc.hasActiveAudio = g_processEnum->CheckProcessHasActiveAudio(proc.processId);
-
-            // Skip if filtering and process doesn't have active audio
-            if (!proc.hasActiveAudio) {
-                continue;
-            }
+        if (!showBackground && !proc.hasWindow && !proc.hasAudioSession) {
+            hiddenBackground++;
+            continue;
         }
 
         LVITEM lvi = {};
         lvi.mask = LVIF_TEXT;
         lvi.iItem = displayedCount;
-
-        // Process name (first column)
         lvi.pszText = (LPWSTR)proc.processName.c_str();
         int index = ListView_InsertItem(g_hProcessList, &lvi);
 
-        // PID (second column)
         wchar_t pidStr[32];
         swprintf_s(pidStr, L"%lu", proc.processId);
         ListView_SetItemText(g_hProcessList, index, 1, pidStr);
 
-        // Window Title (third column)
-        ListView_SetItemText(g_hProcessList, index, 2, (LPWSTR)proc.windowTitle.c_str());
-
-        // Path (fourth column)
+        // Window title, with the folded member count when the app runs as several processes
+        std::wstring title = proc.windowTitle;
+        if (proc.memberCount > 1) {
+            title += (title.empty() ? L"" : L" ") + std::wstring(L"(") + std::to_wstring(proc.memberCount) + L" processes)";
+        }
+        ListView_SetItemText(g_hProcessList, index, 2, (LPWSTR)title.c_str());
         ListView_SetItemText(g_hProcessList, index, 3, (LPWSTR)proc.executablePath.c_str());
 
-        // Restore checked state if this PID was previously checked
+        const wchar_t* audio = proc.hasActiveAudio ? L"playing" : (proc.hasAudioSession ? L"has played" : L"");
+        ListView_SetItemText(g_hProcessList, index, 4, (LPWSTR)audio);
+
         for (DWORD checkedPID : checkedPIDs) {
             if (proc.processId == checkedPID) {
                 ListView_SetCheckState(g_hProcessList, index, TRUE);
                 break;
             }
         }
-
         displayedCount++;
     }
 
-    std::wstring statusMsg = L"Process list refreshed. Showing " + std::to_wstring(displayedCount) + L" process(es)";
+    std::wstring statusMsg = L"Showing " + std::to_wstring(displayedCount) + L" process(es)";
     if (showAudioOnly) {
-        statusMsg += L" with active audio";
+        statusMsg += L" with active audio, " + std::to_wstring(hiddenSilent) + L" silent hidden";
+    }
+    if (hiddenBackground > 0) {
+        statusMsg += L", " + std::to_wstring(hiddenBackground) + L" background hidden";
     }
     statusMsg += L".";
     SetWindowText(g_hStatusText, statusMsg.c_str());
@@ -2023,6 +2043,16 @@ void LoadSettings() {
                 }
             }
 
+            // Load the process list filters
+            if (settings.contains("showAudioOnly") && settings["showAudioOnly"].is_boolean()) {
+                bool showAudioOnly = settings["showAudioOnly"];
+                SendMessage(g_hShowAudioOnlyCheckbox, BM_SETCHECK, showAudioOnly ? BST_CHECKED : BST_UNCHECKED, 0);
+            }
+            if (settings.contains("showBackground") && settings["showBackground"].is_boolean()) {
+                bool showBackground = settings["showBackground"];
+                SendMessage(g_hShowBackgroundCheckbox, BM_SETCHECK, showBackground ? BST_CHECKED : BST_UNCHECKED, 0);
+            }
+
             // Load skip silence option
             if (settings.contains("skipSilence") && settings["skipSilence"].is_boolean()) {
                 bool skipSilence = settings["skipSilence"];
@@ -2132,6 +2162,10 @@ void SaveSettings() {
     // Save skip silence option
     bool skipSilence = (SendMessage(g_hSkipSilenceCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
     settings["skipSilence"] = skipSilence;
+
+    // Process list filters
+    settings["showAudioOnly"] = (SendMessage(g_hShowAudioOnlyCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    settings["showBackground"] = (SendMessage(g_hShowBackgroundCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
     // Save passthrough (monitor audio) option
     bool passthrough = (SendMessage(g_hPassthroughCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);

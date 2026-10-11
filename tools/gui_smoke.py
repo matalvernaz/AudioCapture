@@ -34,6 +34,8 @@ IDC_STATUS_TEXT = 1008
 IDC_RECORDING_LIST = 1009
 IDC_PASSTHROUGH_CHECKBOX = 1021
 IDC_MONITOR_ONLY_CHECKBOX = 1024
+IDC_SHOW_AUDIO_ONLY_CHECKBOX = 1020
+IDC_SHOW_BACKGROUND_CHECKBOX = 1043
 
 WM_CLOSE = 0x0010
 WM_GETTEXT = 0x000D
@@ -41,6 +43,7 @@ WM_SETTEXT = 0x000C
 WM_COMMAND = 0x0111
 BN_CLICKED = 0
 BM_SETCHECK = 0x00F1
+BM_GETCHECK = 0x00F0
 LVM_FIRST = 0x1000
 LVM_GETITEMCOUNT = LVM_FIRST + 4
 LVM_ENSUREVISIBLE = LVM_FIRST + 19
@@ -235,6 +238,10 @@ def main():
     ap.add_argument('--rounds', type=int, default=2)
     ap.add_argument('--seconds', type=float, default=2.0)
     ap.add_argument('--outdir', default=os.path.join(tempfile.gettempdir(), 'audiocapture-guismoke'))
+    ap.add_argument('--list', action='store_true',
+                    help='print the process list rows as rendered (all columns) and exit')
+    ap.add_argument('--filters', action='store_true',
+                    help='tick Show background processes, restart the app, and check the box was remembered')
     ap.add_argument('--kill-after', type=float, default=0.0,
                     help='kill the app this many seconds into the first recording (crash test)')
     ap.add_argument('--monitor', choices=['off', 'file', 'only'], default='off',
@@ -282,6 +289,51 @@ def main():
             break
         time.sleep(0.1)
     print(f'window {hmain:#x}, {lv_count(hlist)} rows in the process list')
+
+    if args.list:
+        for row in range(lv_count(hlist)):
+            cells = [lv_text(mem, hlist, row, col) for col in range(5)]
+            print(f'  row {row}: {cells[0]} | PID {cells[1]} | {cells[2]} | {cells[3][-40:]} | {cells[4]}')
+        print(f'  status: {window_text(hstatus)}')
+        cleanup()
+        return
+
+    if args.filters:
+        def box(control_id):
+            return user32.SendMessageW(user32.GetDlgItem(hmain, control_id), BM_GETCHECK, 0, 0)
+        print(f'  rows {lv_count(hlist)}, background box {box(IDC_SHOW_BACKGROUND_CHECKBOX)}, audio-only box {box(IDC_SHOW_AUDIO_ONLY_CHECKBOX)}')
+        user32.SendMessageW(user32.GetDlgItem(hmain, IDC_SHOW_BACKGROUND_CHECKBOX), BM_SETCHECK, 1, 0)
+        click(hmain, user32.GetDlgItem(hmain, IDC_SHOW_BACKGROUND_CHECKBOX), IDC_SHOW_BACKGROUND_CHECKBOX)
+        time.sleep(2.0)
+        print(f'  after ticking: rows {lv_count(hlist)}; status: {window_text(hstatus)}')
+        user32.PostMessageW(hmain, WM_CLOSE, 0, 0)
+        app.wait(timeout=15)
+        app = subprocess.Popen([args.exe], startupinfo=startup)
+        hmain = None
+        for _ in range(100):
+            time.sleep(0.1)
+            for hwnd in windows_of(app.pid):
+                if user32.GetDlgItem(hwnd, IDC_PROCESS_LIST):
+                    hmain = hwnd
+            if hmain:
+                break
+        if not hmain:
+            raise SystemExit('relaunched window not found')
+        mem.close()
+        mem = RemoteMemory(app.pid)
+        hlist = user32.GetDlgItem(hmain, IDC_PROCESS_LIST)
+        hstatus = user32.GetDlgItem(hmain, IDC_STATUS_TEXT)
+        time.sleep(1.0)
+        print(f'  after restart: rows {lv_count(hlist)}, background box {box(IDC_SHOW_BACKGROUND_CHECKBOX)} (expect 1)')
+        user32.SendMessageW(user32.GetDlgItem(hmain, IDC_SHOW_BACKGROUND_CHECKBOX), BM_SETCHECK, 0, 0)
+        click(hmain, user32.GetDlgItem(hmain, IDC_SHOW_BACKGROUND_CHECKBOX), IDC_SHOW_BACKGROUND_CHECKBOX)
+        time.sleep(2.0)
+        print(f'  after unticking: rows {lv_count(hlist)}')
+        user32.PostMessageW(hmain, WM_CLOSE, 0, 0)
+        app.wait(timeout=15)
+        mem.close()
+        guard.restore()
+        return
 
     set_text(user32.GetDlgItem(hmain, IDC_OUTPUT_PATH), args.outdir)
     if args.monitor != 'off':
