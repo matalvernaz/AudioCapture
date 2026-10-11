@@ -1,10 +1,10 @@
 """Drives AudioCapture's real window with plain Win32 messages to check that starting, stopping
 and starting again a capture of one process keeps capturing that process.
 
-The app is launched minimized and never activated, nothing is typed into the foreground window,
-and every click is a WM_COMMAND posted straight to the app, so a screen reader user can run this
-while doing something else. Works without UI Automation (which exposes this app's controls as
-bare panes on some machines).
+The app is launched without focus, nothing is typed into the foreground window, and every click
+is a WM_COMMAND posted straight to the app, so a screen reader user can run this while doing
+something else. The user's saved settings are put back afterwards. Works without UI Automation
+(which exposes this app's controls as bare panes on some machines).
 
 usage: python -I tools/gui_smoke.py <AudioCapture.exe> <pid-to-capture> [--rounds 2] [--seconds 2]
                                      [--outdir DIR] [--monitor off|file|only]
@@ -13,9 +13,11 @@ and lists the files written. Pair with tools/play_tone.ps1 and tools/check_tones
 """
 
 import argparse
+import atexit
 import ctypes
 import ctypes.wintypes as wt
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -192,8 +194,38 @@ def drain_dialogs(pid):
         time.sleep(0.3)
 
 
+def listdir_or_empty(path):
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
+
+
 def click(hmain, hbutton, control_id):
     user32.PostMessageW(hmain, WM_COMMAND, (BN_CLICKED << 16) | control_id, hbutton)
+
+
+class SettingsGuard:
+    """Keeps the user's real settings out of the test. The app saves its state to
+    %LOCALAPPDATA%\\AudioCapture on close, so whatever this run changes (output folder, monitor
+    boxes) would otherwise greet the user next time."""
+
+    def __init__(self):
+        self.dir = os.path.join(os.environ.get('LOCALAPPDATA', ''), 'AudioCapture')
+        self.backup = None
+        self.existed = os.path.isdir(self.dir)
+        if self.existed:
+            self.backup = tempfile.mkdtemp(prefix='audiocapture-settings-')
+            shutil.copytree(self.dir, os.path.join(self.backup, 'AudioCapture'))
+
+    def restore(self):
+        if getattr(self, 'restored', False):
+            return
+        self.restored = True
+        shutil.rmtree(self.dir, ignore_errors=True)
+        if self.existed:
+            shutil.copytree(os.path.join(self.backup, 'AudioCapture'), self.dir)
+            shutil.rmtree(self.backup, ignore_errors=True)
 
 
 def main():
@@ -207,11 +239,25 @@ def main():
                     help="'file' ticks Monitor audio (record and pass through), 'only' also ticks Monitor only")
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
+    guard = SettingsGuard()
 
     startup = subprocess.STARTUPINFO()
     startup.dwFlags = subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = 4  # SW_SHOWNOACTIVATE: shown but never given focus (minimized would send it to the tray)
     app = subprocess.Popen([args.exe], startupinfo=startup)
+
+    def cleanup():
+        # runs on every exit path: close any dialog, then the window, then put settings back
+        if app.poll() is None:
+            drain_dialogs(app.pid)
+            for hwnd in windows_of(app.pid):
+                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            try:
+                app.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                app.kill()
+        guard.restore()
+    atexit.register(cleanup)
 
     hmain = None
     for _ in range(100):
@@ -222,7 +268,6 @@ def main():
         if hmain:
             break
     if not hmain:
-        app.kill()
         raise SystemExit('main window not found')
 
     mem = RemoteMemory(app.pid)
@@ -248,7 +293,6 @@ def main():
             target_row = row
             break
     if target_row is None:
-        user32.PostMessageW(hmain, WM_CLOSE, 0, 0)
         raise SystemExit(f'pid {args.pid} is not in the process list')
     name = lv_text(mem, hlist, target_row, 0)
     lv_set_state(mem, hlist, target_row, 2 << 12, LVIS_STATEIMAGEMASK)  # tick the checkbox
@@ -256,7 +300,7 @@ def main():
     user32.SendMessageW(hlist, LVM_ENSUREVISIBLE, target_row, 0)
     print(f'ticked row {target_row}: {name} (PID {args.pid})')
 
-    before = set(os.listdir(args.outdir))
+    before = set(listdir_or_empty(args.outdir))
     for round_no in range(1, args.rounds + 1):
         print(f"--- round {round_no}: button '{window_text(hstart)}' -> start")
         click(hmain, hstart, IDC_START_BTN)
@@ -272,13 +316,9 @@ def main():
         drain_dialogs(app.pid)
         print(f'  after stop: {len(recordings(mem, hrec))} active recording(s); status: {window_text(hstatus)}')
 
-    user32.PostMessageW(hmain, WM_CLOSE, 0, 0)
-    try:
-        app.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        app.kill()
     mem.close()
-    for f in sorted(set(os.listdir(args.outdir)) - before):
+    cleanup()
+    for f in sorted(set(listdir_or_empty(args.outdir)) - before):
         print(f'file: {os.path.join(args.outdir, f)}')
 
 
